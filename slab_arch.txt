@@ -193,9 +193,9 @@ kmalloc(size):
 2. Access slab metadata.
 3. Use nearest_free_ptr.
 4. Validate VALID flag.
-5. Descend L1->L0.
+5. Jump from L2 into L1.
 6. Select L0 with free_count > 0.
-7. Remove object from freelist.
+7. link objects with each other.
 8. Decrement free_count.
 9. If page becomes full, update routing hints.
 
@@ -217,7 +217,7 @@ kfree(ptr):
 If L0 becomes fully free:
 
     - Check for pointer in a next_desc_ptr and if it's null,Remove its L1 descriptor in O(1) using prev_desc_ptr and next_desc_ptr.
-    -using prev_desc_ptr jump into the previous page and change next_desc_ptrto NULL
+    -using prev_desc_ptr jump into the previous page and change next_desc_ptr to NULL
     - Return L0 page to page allocator.
     - only if next_desc_ptr is null
 
