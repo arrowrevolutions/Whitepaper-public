@@ -1,1 +1,263 @@
+Hierarchical Slab Allocator (RV64)
+Whitepaper
+License: CC BY-NC 4.0
 
+------------------------------------------------------------
+1. Overview
+------------------------------------------------------------
+
+This document describes a hierarchical slab allocator designed
+for a 64-bit RISC-V (RV64) operating system kernel.
+
+The allocator is page-based (4 KB pages) and organized into
+three structural levels:
+
+    L2 -> L1 -> L0
+
+The design guarantees:
+
+    - O(1) allocation
+    - O(1) deallocation
+    - Deterministic metadata access
+    - Stable descriptor removal
+    - Linear scalability via chained directories
+    - Doubly-linked descriptor control at L1
+
+The slab allocator operates independently from the buddy
+allocator or general-purpose page allocator.
+
+------------------------------------------------------------
+2. Memory Model
+------------------------------------------------------------
+
+Page size: 4096 bytes (4 KB)
+
+All structural levels (L2, L1, L0) are page-aligned.
+
+The allocator manages fixed-size object classes.
+Objects larger than 4096 bytes are not handled by this allocator.
+
+------------------------------------------------------------
+3. Flag Model
+------------------------------------------------------------
+
+All structural entries in L2 and L1 contain a 16-bit flags field.
+
+Bit layout:
+
+    Bit 0  - VALID
+             1 -> entry is valid
+             0 -> entry is free/uninitialized
+
+Remaining bits are reserved.
+
+VALID must always be checked before accessing entry contents.
+
+------------------------------------------------------------
+4. L2 - Slab Region Directory
+------------------------------------------------------------
+
+Purpose:
+    Top-level routing structure.
+    Holds clusters of L1 pages.
+
+Structure:
+
+    Size: 4096 bytes
+    Entry size: 16 bytes
+    Entries: 256 total
+        255 working entries
+        1 chain entry (index 255)
+
+------------------------------------------------------------
+4.1 L2 Working Entry (16 bytes)
+------------------------------------------------------------
+
+    8 bytes   l1_cluster_ptr
+    2 bytes   flags
+    2 bytes   depth
+    2 bytes   free_blocks
+    2 bytes   reserved
+
+------------------------------------------------------------
+4.2 L2 Chain Entry (16 bytes)
+------------------------------------------------------------
+
+    8 bytes   next_l2_ptr
+    2 bytes   flags
+    2 bytes   depth
+    2 bytes   free_entries
+    2 bytes   padding
+
+------------------------------------------------------------
+5. L1 - Page Descriptor Table
+------------------------------------------------------------
+
+Purpose:
+    Manages L0 data pages belonging to a slab class.
+    Provides constant-time descriptor insertion and removal
+    via doubly-linked list entries.
+
+Structure:
+
+    Size: 4096 bytes
+    Entry size: 32 bytes
+    Entries per page: 128 total
+        127 working entries
+        1 chain entry (index 127)
+
+------------------------------------------------------------
+5.1 L1 Working Entry (32 bytes)
+------------------------------------------------------------
+
+    8 bytes   l0_page_ptr
+    8 bytes   next_desc_ptr
+    8 bytes   prev_desc_ptr
+    2 bytes   flags
+    2 bytes   obj_size
+    2 bytes   depth
+    2 bytes   free_count
+
+Fields:
+
+    l0_page_ptr
+        Pointer to L0 data page.
+
+    next_desc_ptr
+        Pointer to next L1 descriptor in linked list.
+
+    prev_desc_ptr
+        Pointer to previous L1 descriptor.
+
+    obj_size
+        Object size for this slab class.
+
+    depth
+        Slab class level identifier.
+
+    free_count
+        Number of free objects in the L0 page.
+
+    flags
+        Must contain VALID bit if entry is active.
+
+L1 working entries form a doubly-linked list.
+
+------------------------------------------------------------
+5.2 L1 Chain Entry (32 bytes)
+------------------------------------------------------------
+
+    8 bytes   parent_l2_ptr
+    8 bytes   next_l1_page
+    8 bytes   prev_l1_page
+    2 bytes   flags
+    2 bytes   depth
+    2 bytes   free_entries
+    2 bytes   padding
+
+Fields:
+
+    parent_l2_ptr
+        Pointer to owning L2 entry.
+
+    next_l1_page
+        Pointer to next L1 page.
+
+    prev_l1_page
+        Pointer to previous L1 page.
+
+    free_entries
+        Number of unused working entries in this L1 page.
+
+L1 pages form a doubly-linked list under L2 control.
+
+------------------------------------------------------------
+6. Slab Class Metadata (40 bytes)
+------------------------------------------------------------
+
+Each slab class maintains:
+
+    8 bytes   base_ptr
+    8 bytes   nearest_free_ptr
+    8 bytes   nearest_free_depth
+    8 bytes   past_nearest_free_ptr
+    8 bytes   past_nearest_free_depth
+
+------------------------------------------------------------
+7. Allocation Procedure
+------------------------------------------------------------
+
+kmalloc(size):
+
+1. Determine slab class.
+2. Access slab metadata.
+3. Use nearest_free_ptr.
+4. Validate VALID flag.
+5. Descend L1->L0.
+6. Select L0 with free_count > 0.
+7. Remove object from freelist.
+8. Decrement free_count.
+9. If page becomes full, update routing hints.
+
+All descriptor operations are O(1).
+
+------------------------------------------------------------
+8. Deallocation Procedure
+------------------------------------------------------------
+
+kfree(ptr):
+
+1. page_base = ptr & ~0xFFF
+2. l1_ptr = *(uint64_t*)page_base
+3. Validate VALID bit.
+4. Compute object index.
+5. Insert into freelist.
+6. Increment free_count.
+
+If L0 becomes fully free:
+
+    - Check for pointer in a next_desc_ptr and if it's null,Remove its L1 descriptor in O(1) using prev_desc_ptr and next_desc_ptr.
+    -using prev_desc_ptr jump into the previous page and change next_desc_ptrto NULL
+    - Return L0 page to page allocator.
+    - only if next_desc_ptr is null
+
+If L1 page becomes empty:
+
+    - Check for pointer in a next_l1_page and if it's null, then Remove L1 page from L2 list.
+    - Update prev_l1_page and previous l1's next_l1_page to null
+    - Return l1 page to page allocator
+    - Only if next_l1_page is null
+
+All structural removals are constant-time.
+
+------------------------------------------------------------
+9. Scalability
+------------------------------------------------------------
+
+Scalability is achieved via:
+
+    - Chained L2 directories
+    - Doubly-linked L1 descriptor tables
+    - O(1) descriptor unlinking
+    - Local routing hints
+
+No global rebalance required.
+
+------------------------------------------------------------
+10. Design Properties
+------------------------------------------------------------
+
+- Deterministic O(1) allocation
+- Deterministic O(1) deallocation
+- O(1) descriptor removal
+- Doubly-linked descriptor model
+- Linear expansion
+- Page-aligned hierarchical control
+- Minimal L0 overhead (8 bytes only)
+
+
+Copyright (c) 2026 Arrow Revolutions (AR).All rights reserved.
+
+------------------------------------------------------------
+End of Document
+------------------------------------------------------------
